@@ -1,0 +1,665 @@
+---
+title: "Dinucleotide Recoding"
+author: "Ivan Trus, 2019-2022"
+output:
+  html_document:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = TRUE,
+  warning = TRUE
+)
+```
+
+# Input data
+
+```{r init1 data_input}
+StartTime <- Sys.time()
+library(magrittr)
+library(DT)
+
+## Please feel free to modify parameters listed below in the next lines
+## The next fragment is the only source of input parameters for the current script.
+
+Power.CpG.strict <- 100
+Power.TpA.strict <- 100
+Power.CpG.non_strict <- 0
+Power.TpA.non_strict <- 0
+ScriptRuntimeSpeed <- 1
+CPB.calculation <- TRUE
+InitialNucleotideSequence <- c(
+"ATCAGGTGCATAGGAGTCAGCAATAGGGACTTTGTGGAAGGTATGTCAGGTGGGACTTGGGTTGATGTTGTCTTGGAACATGGAGGTTGTGTCACCGTAATGGCACAGGACAAACCGACTGTCGACATAGAGCTGGTTACAACAACAGTCAGCAACATGGCGGAGGTAAGATCCTACTGCTATGAGGCATCAATATCGGACATGGCTTCGGACAGCCGCTGCCCAACACAAGGTGAAGCCTACCTTGACAAGCAATCAGACACTCAATATGTCTGCAAAAGAACGTTAGTGGACAGAGGCTGGGGAAATGGATGTGGACTTTTTGGCAAAGGGAGCCTGGTGACATGCGCTAAGTTTGCATGCTCCAAGAAAATGACCGGGAAGAGCATCCAGCCAGAGAATCTGGAGTACCGGATAATGCTGTCAGTTCATGGCTCCCAGCACAGTGGGATGATCGTTAATGACACAGGACATGAAACTGATGAGAATAGAGCGAAGGTTGAGATAACGCCCAATTCACCAAGAGCCGAAGCCACCCTGGGGGGTTTTGGAAGCCTAGGACTTGATTGTGAACCGAGGACAGGCCTTGACTTTTCAGATTTGTATTACTTGACTATGAATAACAAGCACTGGTTGGTTCACAAGGAGTGGTTCCACGACATTCCATTACCTTGGCACGCTGGGGCAGACACCGGAACTCCACACTGGAACAACAAAGAAGCACTGGTAGAGTTCAAGGACGCACATGCCAAAAGGCAAACTGTCGTGGTTCTAGGGAGTCAAGAAGGAGCAGTTCACACGGCCCTTGCTGGAGCTCTGGAGGCTGAGATGGATGGTGCAAAGGGAAGGCTGTCCTCTGGCCACTTGAAATGTCGCCTGAAAATGGATAAACTTAGATTGAAGGGCGTGTCATACTCCTTGTGTACCGCAGCGTTCACATTCACCAAGATCCCGGCTGAAACACTGCACGGGACAGTCACAGTGGAGGTACAGTACGCAGGGACAGATGGACCTTGCAAGGTTCCAGCTCAGATGGCGGTGGACATGCAAACTCTGACCCCAGTTGGGAGGTTGATAACCGCTAACCCCGTAATCACTGAAAGCACTGAGAACTCTAAGATGATGCTGGAACTTGATCCACCATTTGGGGACTCTTACATTGTCATAGGAGTCGGGGAGAAGAAGATCACCCACCACTGGCACAGGAGTGGCAGCACCATTGGAAAAGCATTTGAAGCCACTGTGAGAGGTGCCAAGAGAATGGCAGTCTTGGGAGACACAGCCTGGGACTTTGGATCAGTTGGAGGCGCTCTCAACTCATTGGGCAAGGGCATCCATCAAATTTTTGGAGCAGCTTTCAAATCATTGTTTGGAGGAATGTCCTGGTTCTCACAAATTCTCATTGGAACGTTGCTGATGTGGTTGGGTCTGAACACAAAGAATGGATCTATTTCCCTTATGTGCTTGGCCTTAGGGGGAGTGTTGATCTTCTTATCCACAGCTGTCTCTGCT"
+)
+
+# End of the block containing basic parameters and user input.
+```
+
+## Power of the cycle:
+
+|Dinucleotide for enrichment/depletion|Mode|Value (-100% ... +100%)|
+|:-:|:-:|:-:|
+|CpG|STRICT|**`r Power.CpG.strict`**|
+|TpA|STRICT|**`r Power.TpA.strict`**|
+|CpG|NON-STRICT|**`r Power.CpG.non_strict`**|
+|TpA|NON-STRICT|**`r Power.TpA.non_strict`**|
+
+## Initial nucleotide sequence:
+
+```{r init2 tests}
+InitialNucleotideSequence <- toupper(InitialNucleotideSequence)
+NucleotideSequenceLength <- nchar(InitialNucleotideSequence)
+stopifnot(
+  "Dividing sequnce length by 3 should give 0 as remainder." =
+    NucleotideSequenceLength %% 3 == 0
+)
+
+# Loading CPS from the external file
+if (CPB.calculation == T) {
+  CPS <- read.csv("CPS_reference_dataset.csv")
+  stopifnot(
+    "The CPS_reference_dataset.csv file with CPS reference data was not loaded." =
+      length(CPS$AA.pair) == 3721
+  )
+}
+
+cat(
+  InitialNucleotideSequence, "\nSequence length:", NucleotideSequenceLength, "nt or",
+  NucleotideSequenceLength / 3, "codons/aa"
+)
+```
+
+## Other runtime parameters:
+
+|Parameter|Value|
+|:-:|:-:|
+|Script Runtime Speed (0-100, 101)|**`r ScriptRuntimeSpeed`**|
+|CPB calculation|**`r CPB.calculation`**|
+
+```{r init3 declaring functions}
+Nucleotide <- c("A", "C", "G", "T")
+
+InitialCodons <- NULL
+for (i in 1:(NucleotideSequenceLength / 3)) {
+  InitialCodons <- c(InitialCodons, substr(InitialNucleotideSequence, i * 3 - 2, i * 3))
+}
+
+Codons <- InitialCodons
+
+Words <- function(length, alphabet) {
+  if (length == 1) {
+    return(alphabet)
+  } else {
+    kronecker(alphabet, Words(length - 1, alphabet), paste, sep = "")
+  }
+}
+
+NucleotidesCount <- function(seq, wordsize) {
+  oligos.levels <- levels(as.factor(Words(wordsize, Nucleotide)))
+  oligos <- NULL
+  for (i in 1:(nchar(seq) - 1)) oligos <- c(oligos, substr(seq, i, i + wordsize - 1))
+  return(table(factor(oligos, levels = oligos.levels)))
+}
+
+InitialDinucleotideLevel <- NucleotidesCount(InitialNucleotideSequence, 2)
+
+# The main replacement function of changing CodonA to CodonB with next letter NextLetter.
+# Power is taken in account. If Power is negative, inversion of the cycle is done.
+CodonReplace <- function(CodonA, CodonB, NextLetter, Power) {
+  if (Power < 0) {
+    Power <- abs(Power)
+    temp <- CodonA
+    CodonA <- CodonB
+    CodonB <- temp
+  }
+  CodonAPosition <- which(Codons == CodonA)
+  CodonBPosition <- which(Codons == CodonB)
+  if (Power < 100) {
+    CodonAPosition <- sample(
+      CodonAPosition,
+      (Power * length(CodonAPosition)) %/% 100
+    )
+  }
+
+  # Replacement = Replacement mutation, Compensation = Compensation mutation
+  ReplacementIsPossible <- CodonAPosition[which(substr(Codons[CodonAPosition + 1], 1, 1) ==
+    NextLetter)]
+  CompensationIsPossible <- CodonBPosition[which(substr(Codons[CodonBPosition + 1], 1, 1) !=
+    NextLetter)]
+
+  # trimming the longest substitution list
+  if (length(ReplacementIsPossible) > length(CompensationIsPossible)) {
+    ReplacementIsPossible <- sample(ReplacementIsPossible,
+      size = length(CompensationIsPossible)
+    )
+  } else
+  if (length(ReplacementIsPossible) < length(CompensationIsPossible)) {
+    CompensationIsPossible <- sample(CompensationIsPossible,
+      size = length(ReplacementIsPossible)
+    )
+  }
+  Codons[ReplacementIsPossible] <- CodonB
+  Codons[CompensationIsPossible] <- CodonA
+  return(Codons)
+}
+
+# The main replacement function of changing CodonA to CodonB with preceeding letter PreviousLetter.
+# Power is taken in account. If Power is negative, inversion of the cycle is done.
+# This function is a hack for S and R processing for a better enrichemnt of TpA
+CodonReplace2 <- function(CodonA, CodonB, PreviousLetter, Power) {
+  if (Power < 0) {
+    Power <- abs(Power)
+    temp <- CodonA
+    CodonA <- CodonB
+    CodonB <- temp
+  }
+  CodonAPosition <- which(Codons == CodonA)
+  CodonBPosition <- which(Codons == CodonB)
+  if (Power < 100) {
+    CodonAPosition <- sample(
+      CodonAPosition,
+      (Power * length(CodonAPosition)) %/% 100
+    )
+  }
+
+  # Replacement = Replacement mutation, Compensation = Compensation mutation
+  ReplacementIsPossible <- CodonAPosition[which(substr(Codons[CodonAPosition - 1], 3, 3) ==
+    PreviousLetter)]
+  CompensationIsPossible <- CodonBPosition[which(substr(Codons[CodonBPosition - 1], 3, 3) !=
+    PreviousLetter)]
+
+  # trimming the longest substitution list
+  if (length(ReplacementIsPossible) > length(CompensationIsPossible)) {
+    ReplacementIsPossible <- sample(ReplacementIsPossible,
+      size =
+        length(CompensationIsPossible)
+    )
+  } else
+  if (length(ReplacementIsPossible) < length(CompensationIsPossible)) {
+    CompensationIsPossible <- sample(CompensationIsPossible,
+      size = length(ReplacementIsPossible)
+    )
+  }
+  Codons[ReplacementIsPossible] <- CodonB
+  Codons[CompensationIsPossible] <- CodonA
+  return(Codons)
+}
+
+# The replacement function of changing CodonA to CodonB with or without the next letter NextLetter
+# This is unconditional replacement with no preservation of nucleotides
+# Power is taken in account. If Power is negative, inversion of the cycle is done.
+CodonReplace3 <- function(CodonA, CodonB, NextLetter, Power) {
+  if (Power < 0) {
+    Power <- abs(Power)
+    temp <- CodonA
+    CodonA <- CodonB
+    CodonB <- temp
+  }
+  CodonAPosition <- which(Codons == CodonA)
+  if (Power < 100) {
+    CodonAPosition <- sample(
+      CodonAPosition,
+      (Power * length(CodonAPosition)) %/% 100
+    )
+  }
+  if (NextLetter == "") {
+    ReplacementIsPossible <- CodonAPosition
+  } else {
+    ReplacementIsPossible <- CodonAPosition[which(substr(Codons[CodonAPosition + 1], 1, 1) ==
+      NextLetter)]
+  }
+  Codons[ReplacementIsPossible] <- CodonB
+  return(Codons)
+}
+
+# CPB calculation based on CPS scores
+CPB <- function(Codons, CPS_reference) {
+  # Each Codon Pair (2x3 nt) is a Hexamer (6 nt)
+  Hexamer <- NULL
+  for (i in 1:(length(Codons) - 1)) {
+    Hexamer <- c(Hexamer, paste0(Codons[i:(i + 1)],
+      collapse = ""
+    ))
+  }
+  return(Hexamer %>%
+    sapply(function(x) match(x, CPS$Codon.pair)) %>%
+    CPS[., CPS_reference + 2] %>%
+    sum() %>%
+    divide_by(length(Hexamer)))
+  remove(Hexamer, i)
+}
+```
+
+```{r dataset}
+StandardGeneticCode <- matrix(c(
+  "GCT", "GCC", "GCA", "GCG", "TAT", "TAC",
+  "CGT", "CGC", "CGA", "CGG", "AGA", "AGG",
+  "AAT", "AAC", "GAT", "GAC", "TGT", "TGC",
+  "GTT", "GTC", "GTA", "GTG", "CAA", "CAG",
+  "GGT", "GGC", "GGA", "GGG", "GAA", "GAG",
+  "CAT", "CAC", "ATT", "ATC", "ATA", "TGG",
+  "TTA", "TTG", "CTT", "CTC", "CTA", "CTG",
+  "AAA", "AAG", "ATG", "TTT", "TTC",
+  "CCT", "CCC", "CCA", "CCG",
+  "TCT", "TCC", "TCA", "TCG", "AGT", "AGC",
+  "ACT", "ACC", "ACA", "ACG",
+  "TAA", "TGA", "TAG",
+
+  "A", "A", "A", "A", "Y", "Y",
+  "R", "R", "R", "R", "R", "R",
+  "N", "N", "D", "D", "C", "C",
+  "V", "V", "V", "V", "Q", "Q",
+  "G", "G", "G", "G", "E", "E",
+  "H", "H", "I", "I", "I", "W",
+  "L", "L", "L", "L", "L", "L",
+  "K", "K", "M", "F", "F",
+  "P", "P", "P", "P",
+  "S", "S", "S", "S", "S", "S",
+  "T", "T", "T", "T",
+  "*", "*", "*"
+), ncol = 2)
+
+CpGEnrichmentCodons <- rbind(
+  # M, W, Q, K, E & stop codons are skipped
+  # F, Y, C, N, D & H
+  c("TTT", "TTC"), c("TAT", "TAC"), c("TGT", "TGC"), c("AAT", "AAC"), c("GAT", "GAC"),
+  c("CAT", "CAC"),
+  # I
+  c("ATT", "ATC"), c("ATA", "ATC"),
+  # V
+  c("GTA", "GTC"), c("GTT", "GTC"), c("GTG", "GTC"),
+  # A
+  c("GCA", "GCC"), c("GCT", "GCC"), c("GCG", "GCC"),
+  # T
+  c("ACA", "ACC"), c("ACT", "ACC"), c("ACG", "ACC"),
+  # P
+  c("CCA", "CCC"), c("CCT", "CCC"), c("CCG", "CCC"),
+  # G
+  c("GGA", "GGC"), c("GGT", "GGC"), c("GGG", "GGC"),
+  # L
+  c("CTT", "CTC"), c("CTA", "CTC"), c("CTG", "CTC"), c("TTA", "CTC"), c("TTG", "CTC"),
+  # R
+  c("CGT", "CGC"), c("CGA", "CGC"), c("CGG", "CGC"), c("AGA", "CGC"), c("AGG", "CGC"),
+  # S
+  c("TCA", "TCC"), c("TCT", "TCC"), c("TCG", "TCC"), c("TCA", "AGC"), c("TCT", "AGC"),
+  c("TCG", "AGC"), c("AGT", "AGC"), c("AGT", "TCC")
+)
+
+CpGEnrichmentCodons2 <- rbind(
+  # additional part for the non-strict enrichment/depletion
+  # A
+  c("GCT", "GCG"), c("GCC", "GCG"), c("GCA", "GCG"),
+  # R
+  c("AGA", "CGA"), c("AGG", "CGG"),
+  # P
+  c("CCT", "CCG"), c("CCC", "CCG"), c("CCA", "CCG"),
+  # S
+  c("TCT", "TCG"), c("TCC", "TCG"), c("TCA", "TCG"), c("AGT", "TCG"), c("AGC", "TCG"),
+  # T
+  c("ACA", "ACG"), c("ACT", "ACG"), c("ACC", "ACG")
+)
+
+TpAEnrichmentCodons <- rbind(
+  # M, W, Q, K, E & stop codons are skipped
+  # F, Y, C, N, D & H
+  c("TTC", "TTT"), c("TAC", "TAT"), c("TGC", "TGT"), c("AAC", "AAT"), c("GAC", "GAT"),
+  c("CAC", "CAT"),
+  # I
+  c("ATC", "ATT"), c("ATA", "ATT"),
+  # V
+  c("GTA", "GTT"), c("GTC", "GTT"), c("GTG", "GTT"),
+  # A
+  c("GCA", "GCT"), c("GCC", "GCT"), c("GCG", "GCT"),
+  # T
+  c("ACA", "ACT"), c("ACC", "ACT"), c("ACG", "ACT"),
+  # P
+  c("CCA", "CCT"), c("CCC", "CCT"), c("CCG", "CCT"),
+  # G
+  c("GGA", "GGT"), c("GGC", "GGT"), c("GGG", "GGT"),
+  # L
+  c("CTA", "CTT"), c("CTC", "CTT"), c("CTG", "CTT"), c("TTA", "CTT"), c("TTG", "CTT"),
+  # R
+  c("CGA", "CGT"), c("CGC", "CGT"), c("CGG", "CGT"), c("AGA", "CGT"), c("AGG", "CGT"),
+  # S
+  c("TCA", "TCT"), c("TCC", "TCT"), c("TCG", "TCT"), c("TCA", "AGT"), c("TCC", "AGT"),
+  c("TCG", "AGT"), c("AGC", "AGT"), c("AGC", "TCT")
+)
+
+TpAEnrichmentCodons2 <- rbind(
+  # This fits only to S and R, because they can change the 4th letter in codon pair
+  # S
+  c("TCT", "AGT"), c("TCT", "AGC"), c("TCC", "AGT"), c("TCC", "AGC"),
+  c("TCA", "AGT"), c("TCA", "AGC"), c("TCG", "AGT"), c("TCG", "AGC"),
+  # R
+  c("CGT", "AGA"), c("CGT", "AGG"), c("CGC", "CGA"), c("CGC", "AGG"),
+  c("CGA", "AGA"), c("CGA", "AGG"), c("CGG", "CGA"), c("CGG", "AGG")
+)
+
+TpAEnrichmentCodons3 <- rbind(
+  # additional part for the NON-STRICT enrichment.
+  # I
+  c("ATT", "ATA"), c("ATC", "ATA"),
+  # L
+  c("TTG", "TTA"), c("CTT", "CTA"), c("CTC", "CTA"), c("CTG", "CTA"),
+  # V
+  c("GTT", "GTA"), c("GTC", "GTA"), c("GTG", "GTA"),
+  # stop codon
+  c("TGA", "TAG")
+)
+```
+
+# Collecting statistics on POWER performance
+
+* The charts provide independent assessment of enrichment efficiency for each dinucleotide (CpG and TpA) and for each method of enrichment (**STRICT** and **NON-STRICT**).
+* Charts show relative increase (FC, fold change), while table below shows both absolute numbers and fold change (FC).
+
+```{r stat, fig.width=4.7, fig.height=6,fig.show='hold'}
+if (ScriptRuntimeSpeed > 0) {
+  tabl <- matrix(nrow = 2, ncol = 13)
+  colnames(tabl) <- c(
+    "Power", "CpG (strict), abs", "CpG (strict), FC",
+    "CpG (non-strict), abs", "CpG (non-strict), FC",
+    "TpA (strict), abs", "TpA (strict), FC",
+    "TpA (non-strict), abs", "TpA (non-strict), FC",
+    "CPB (strict CpG)", "CPB (non-strict CpG)",
+    "CPB (strict TpA)", "CPB (non-strict TpA)"
+  )
+  for (Power in seq(-100, 100, by = ScriptRuntimeSpeed)) {
+    Codons <- InitialCodons
+
+    # [1] is coded as STRICT + CpG, [2] is coded as NON-STRICT + CpG
+    # [3] is coded as STRICT + TpA, [4] is coded as NON-STRICT + TpA
+    Effect.on.Dinucleotide <- vector(length = 4, mode = "list")
+    Effect.Dinucleotide.on.CPB <- vector(length = 4, mode = "list")
+
+    for (i in 1:length(CpGEnrichmentCodons[, 1])) {
+      Codons <- CodonReplace(
+        CpGEnrichmentCodons[i, 1],
+        CpGEnrichmentCodons[i, 2], "G", Power
+      )
+    }
+    Effect.on.Dinucleotide[1] <- NucleotidesCount(paste0(Codons, collapse = ""), 2)[7]
+    Effect.Dinucleotide.on.CPB[1] <- CPB(Codons, 1)
+
+    Codons <- InitialCodons
+    for (i in 1:length(CpGEnrichmentCodons[, 1])) {
+      Codons <- CodonReplace3(
+        CpGEnrichmentCodons[i, 1],
+        CpGEnrichmentCodons[i, 2], "G", Power
+      )
+    }
+    for (i in 1:length(CpGEnrichmentCodons2[, 1])) {
+      Codons <- CodonReplace3(
+        CpGEnrichmentCodons2[i, 1],
+        CpGEnrichmentCodons2[i, 2], "", Power
+      )
+    }
+    Effect.on.Dinucleotide[2] <- NucleotidesCount(paste0(Codons, collapse = ""), 2)[7]
+    Effect.Dinucleotide.on.CPB[2] <- CPB(Codons, 1)
+
+    Codons <- InitialCodons
+    for (i in 1:length(TpAEnrichmentCodons[, 1])) {
+      Codons <- CodonReplace(
+        TpAEnrichmentCodons[i, 1],
+        TpAEnrichmentCodons[i, 2], "A", Power
+      )
+    }
+    for (i in 1:length(TpAEnrichmentCodons2[, 1])) {
+      Codons <- CodonReplace2(
+        TpAEnrichmentCodons2[i, 1],
+        TpAEnrichmentCodons2[i, 2], "T", Power
+      )
+    }
+    Effect.on.Dinucleotide[3] <- NucleotidesCount(paste0(Codons, collapse = ""), 2)[13]
+    Effect.Dinucleotide.on.CPB[3] <- CPB(Codons, 1)
+
+    Codons <- InitialCodons
+    for (i in 1:length(TpAEnrichmentCodons[, 1])) {
+      Codons <- CodonReplace3(
+        TpAEnrichmentCodons[i, 1],
+        TpAEnrichmentCodons[i, 2], "A", Power
+      )
+    }
+    for (i in 1:length(TpAEnrichmentCodons3[, 1])) {
+      Codons <- CodonReplace3(
+        TpAEnrichmentCodons3[i, 1],
+        TpAEnrichmentCodons3[i, 2], "", Power
+      )
+    }
+    Effect.on.Dinucleotide[4] <- NucleotidesCount(paste0(Codons, collapse = ""), 2)[13]
+    Effect.Dinucleotide.on.CPB[4] <- CPB(Codons, 1)
+
+    tabl <- rbind(tabl, c(
+      Power, Effect.on.Dinucleotide[1],
+      as.numeric(Effect.on.Dinucleotide[1]) / InitialDinucleotideLevel[7],
+      Effect.on.Dinucleotide[2],
+      as.numeric(Effect.on.Dinucleotide[2]) / InitialDinucleotideLevel[7],
+      Effect.on.Dinucleotide[3],
+      as.numeric(Effect.on.Dinucleotide[3]) / InitialDinucleotideLevel[13],
+      Effect.on.Dinucleotide[4],
+      as.numeric(Effect.on.Dinucleotide[4]) / InitialDinucleotideLevel[13],
+      Effect.Dinucleotide.on.CPB[1], Effect.Dinucleotide.on.CPB[2],
+      Effect.Dinucleotide.on.CPB[3], Effect.Dinucleotide.on.CPB[4]
+    ))
+  }
+  matplot(tabl[, 1], cbind(tabl[, "CpG (strict), FC"], tabl[, "CpG (non-strict), FC"]),
+    main = "Efficiency of CpG dinculeotide\nenrichment/depletion",
+    xlab = "Power, %", ylab = "Dinucleotide enrichment/depletion, FC", type = "l",
+    col = c("red", "red"), lwd = 3, lty = c(1, 3)
+  )
+  abline(h = 1, col = "grey")
+  abline(v = 0, col = "grey")
+  legend("topleft",
+    legend = c("CpG (strict)", "CpG (non-strict)"),
+    col = c("red", "red"), lwd = 3, lty = c(1, 3), inset = 0.05
+  )
+  matplot(tabl[, 1], cbind(tabl[, "CPB (strict CpG)"], tabl[, "CPB (non-strict CpG)"]),
+    main = "Effect of CpG dinculeotide\nenrichment/depletion on CPB",
+    xlab = "Power, %", ylab = "CPB", type = "l",
+    col = c("blue", "blue"), lwd = 3, lty = c(1, 3)
+  )
+  abline(h = 0, col = "grey")
+  abline(v = 0, col = "grey")
+  legend("bottomleft",
+    legend = c("CpG (strict)", "CpG (non-strict)"),
+    col = c("blue", "blue"), lwd = 3, lty = c(1, 3), inset = 0.05
+  )
+  matplot(tabl[, 1], cbind(tabl[, "TpA (strict), FC"], tabl[, "TpA (non-strict), FC"]),
+    main = "Efficiency of TpA dinculeotide\nenrichment/depletion",
+    xlab = "Power, %", ylab = "Dinucleotide enrichment/depletion, FC", type = "l",
+    col = c("red", "red"), lwd = 3, lty = c(1, 3)
+  )
+  abline(h = 1, col = "grey")
+  abline(v = 0, col = "grey")
+  legend("topleft",
+    legend = c("TpA (strict)", "TpA (non-strict)"),
+    col = c("red", "red"), lwd = 3, lty = c(1, 3), inset = 0.05
+  )
+  matplot(tabl[, 1], cbind(tabl[, "CPB (strict TpA)"], tabl[, "CPB (non-strict TpA)"]),
+    main = "Effect of TpA dinculeotide\nenrichment/depletion on CPB",
+    xlab = "Power, %", ylab = "CPB", type = "l",
+    col = c("blue", "blue"), lwd = 3, lty = c(1, 3)
+  )
+  abline(h = 0, col = "grey")
+  abline(v = 0, col = "grey")
+  legend("bottomleft",
+    legend = c("TpA (strict)", "TpA (non-strict)"),
+    col = c("blue", "blue"), lwd = 3, lty = c(1, 3), inset = 0.05
+  )
+  DT::datatable(as.data.frame(tabl[-1:-2, ]), caption = "CpG and TpA enrichment/depletion") %>%
+    DT::formatRound(columns = c(3, 5, 7, 9:13), digits = 4)
+}
+```
+
+```{r main}
+# Main processing hub
+
+Codons <- InitialCodons
+
+# Non-strict part of CpG enrichment/depletion
+for (i in 1:length(CpGEnrichmentCodons[, 1])) {
+  Codons <- CodonReplace3(
+    CpGEnrichmentCodons[i, 1],
+    CpGEnrichmentCodons[i, 2], "G", Power.CpG.non_strict
+  )
+}
+for (i in 1:length(CpGEnrichmentCodons2[, 1])) {
+  Codons <- CodonReplace3(
+    CpGEnrichmentCodons2[i, 1],
+    CpGEnrichmentCodons2[i, 2], "", Power.CpG.non_strict
+  )
+}
+
+# Master cycle for strict CpG enrichment/depletion
+for (i in 1:length(CpGEnrichmentCodons[, 1])) {
+  Codons <- CodonReplace(
+    CpGEnrichmentCodons[i, 1],
+    CpGEnrichmentCodons[i, 2],
+    "G", Power.CpG.strict
+  )
+}
+
+# Non-strict part of TpA enrichment/depletion
+for (i in 1:length(TpAEnrichmentCodons[, 1])) {
+  Codons <- CodonReplace3(
+    TpAEnrichmentCodons[i, 1],
+    TpAEnrichmentCodons[i, 2], "A", Power.TpA.non_strict
+  )
+}
+for (i in 1:length(TpAEnrichmentCodons3[, 1])) {
+  Codons <- CodonReplace3(
+    TpAEnrichmentCodons3[i, 1],
+    TpAEnrichmentCodons3[i, 2], "", Power.TpA.non_strict
+  )
+}
+
+# Master cycle #1 for STRICT TpA enrichment/depletion
+for (i in 1:length(TpAEnrichmentCodons[, 1])) {
+  Codons <- CodonReplace(
+    TpAEnrichmentCodons[i, 1],
+    TpAEnrichmentCodons[i, 2],
+    "A", Power.TpA.strict
+  )
+}
+# Master cycle #2 for STRICT TpA enrichment/depletion
+for (i in 1:length(TpAEnrichmentCodons2[, 1])) {
+  Codons <- CodonReplace2(
+    TpAEnrichmentCodons2[i, 1],
+    TpAEnrichmentCodons2[i, 2],
+    "T", Power.TpA.strict
+  )
+}
+```
+
+# Checking for errors
+
+```{r tests}
+FinalNucleotideSequence <- paste0(Codons, collapse = "")
+FinalCodons <- Codons
+
+# AA translation check-up
+for (i in 1:length(StandardGeneticCode) / 2) {
+  Codons[Codons == StandardGeneticCode[i, 1]] <-
+    StandardGeneticCode[i, 2]
+}
+FinalAASequence <- paste0(Codons, collapse = "")
+Codons <- InitialCodons
+for (i in 1:length(StandardGeneticCode) / 2) {
+  Codons[Codons == StandardGeneticCode[i, 1]] <-
+    StandardGeneticCode[i, 2]
+}
+stopifnot("Aminoacid sequence was affected." = FinalAASequence == paste0(Codons, collapse = ""))
+
+# mononucleotides frequency check-up
+tabl <- cbind(
+  NucleotidesCount(InitialNucleotideSequence, 1),
+  NucleotidesCount(FinalNucleotideSequence, 1),
+  NucleotidesCount(FinalNucleotideSequence, 1) - NucleotidesCount(InitialNucleotideSequence, 1),
+  NucleotidesCount(FinalNucleotideSequence, 1) / NucleotidesCount(InitialNucleotideSequence, 1)
+)
+colnames(tabl) <- c("Before", "After", "Delta", "Fold change")
+if ((abs(Power.TpA.non_strict) + abs(Power.CpG.non_strict)) == 0) {
+  stopifnot(
+    "Mononucleotide frequency was altered while running STRICT cycle" =
+      colSums(abs(tabl))["Delta"] == 0
+  )
+}
+```
+
+* Amino acid composition should be preserved. *PASSED!*
+* If only **STRICT** cycle was used, mononucleotide frequencies should be preserved. *PASSED!*
+
+# Reporting
+
+```{r final}
+
+cat("Final nucleotide sequence", FinalNucleotideSequence,
+  "\nAmino acid sequence", FinalAASequence,
+  fill = T
+)
+
+DT::datatable(as.data.frame(tabl),
+  caption =
+    "Mononucleotide frequencies (absolute values and fold change)"
+)
+
+tabl <- cbind(
+  NucleotidesCount(InitialNucleotideSequence, 2),
+  NucleotidesCount(FinalNucleotideSequence, 2),
+  NucleotidesCount(FinalNucleotideSequence, 2) - NucleotidesCount(InitialNucleotideSequence, 2),
+  NucleotidesCount(FinalNucleotideSequence, 2) / InitialDinucleotideLevel
+)
+colnames(tabl) <- c("Before", "After", "Delta", "Fold change")
+DT::datatable(as.data.frame(tabl),
+  caption = "Dinucleotide frequencies (absolute values and fold change)",
+  options = list(pageLength = 16)) %>%
+    DT::formatRound(columns = 4, digits = 4)
+
+(NucleotidesCount(FinalNucleotideSequence, 2) / InitialDinucleotideLevel) %>%
+  matrix(ncol = 4, byrow = F, dimnames = list(Nucleotide, Nucleotide)) %>%
+  heatmap(
+    Rowv = NA, Colv = NA, col = heat.colors(256), symm = T, revC = T,
+    main = "Fold change for each dinucleotide frequency",
+    xlab = "Second nucleotide", ylab = "First nucleotide"
+  )
+```
+
+**Legend:** *The heatmap chart shows relative change in dinucleotide frequencies. From red (minimal values) to white (maximal values)*
+
+```{r CPB calculation and reporting}
+if (CPB.calculation == T) {
+  tabl <- cbind(
+    names(CPS)[(1:11) + 2],
+    sapply(1:11, function(x) CPB(InitialCodons, x)),
+    sapply(1:11, function(x) CPB(FinalCodons, x))
+  )
+  colnames(tabl) <- c("CPS reference", "CPB (before)", "CPB (after)")
+  DT::datatable(as.data.frame(tabl), caption = "Reporting CPB values", options = list(pageLength = 11)) %>%
+    DT::formatRound(columns = -1, digits = 4)
+}
+
+# Please comment the next lines if you need to debug the script. It is here just for cleaning up the environment.
+ remove(
+   CpGEnrichmentCodons, CpGEnrichmentCodons2,
+   TpAEnrichmentCodons, TpAEnrichmentCodons2, TpAEnrichmentCodons3,
+   CodonReplace, CodonReplace2, CodonReplace3,
+   InitialCodons, InitialDinucleotideLevel, InitialNucleotideSequence,
+   FinalAASequence, FinalNucleotideSequence, FinalCodons,
+   Effect.on.Dinucleotide, Effect.Dinucleotide.on.CPB,
+   StandardGeneticCode, Nucleotide, NucleotidesCount, Codons,
+   Power, ScriptRuntimeSpeed, NucleotideSequenceLength, Words, i, tabl,
+   Power.CpG.strict, Power.CpG.non_strict, Power.TpA.strict, Power.TpA.non_strict,
+   CPS, CPB, CPB.calculation
+ )
+```
+
+**Execution start time:** *`r StartTime`*  
+**Execution end time  :** *`r Sys.time()`*
